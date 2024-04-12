@@ -15,6 +15,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 from copy import deepcopy
+import torch.cuda as cuda 
 
 from Utils.dataloader import *
 
@@ -32,6 +33,8 @@ hyperparams = {
     'batch_sizes': [16, 32, 64]
 }
 
+device = None
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('model', choices=['baseline_cnn', 'cnn'])
@@ -46,6 +49,7 @@ def parse_args():
     parser.add_argument('--tune', action='store_true')
     parser.add_argument('--plot', action='store_true')
     parser.add_argument('--misclas', action='store_true')
+    parser.add_argument('--GPU', action='store_true')
     return parser.parse_args()
 
 def plot_history(train_losses, val_losses, train_accuracies, val_accuracies):
@@ -129,6 +133,7 @@ def train(model,
         running_loss = 0.0
         for inputs, labels in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch'):
             inputs, labels = inputs.float(), labels.float()  # Ensure data is the correct type
+            inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = loss_func(outputs.squeeze(), labels)  # Ensure dimensions match between outputs and labels
@@ -157,6 +162,7 @@ def train(model,
         with torch.no_grad():  # No need to track gradients
             for inputs, labels in  tqdm(dev_loader, desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch'):
                 inputs, labels = inputs.float(), labels.float()  # Ensure data is the correct type
+                inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
                 outputs = model(inputs)
                 loss = loss_func(outputs.squeeze(), labels)  # Ensure dimensions match
                 val_running_loss += loss.item()
@@ -183,6 +189,7 @@ def train(model,
         if val_loss < best_loss:
             best_loss = val_loss
             best_model = deepcopy(model.state_dict())
+            torch.save(best_model, OPTS.model + '_best.pth')  # Save the best model
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -191,7 +198,7 @@ def train(model,
                 break
     
     # Load the best model state
-    model.load_state_dict(best_model)
+    model.load_state_dict(torch.load('model_best.pth'))
     
     end_time = time.time()
     print(f'Training completed in {end_time - start_time:.2f} seconds.')
@@ -211,6 +218,8 @@ def evaluate(model, test_loader):
         for inputs, labels in tqdm(test_loader, desc='Evaluating', unit='batch'):
 
             inputs, labels = inputs.float(), labels.float()  # Ensure data is the correct type
+            inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
+
             outputs = model(inputs)
 
             # Compute the loss for this batch and add to total loss
@@ -279,6 +288,8 @@ def collect_misclassified(model, data_loader):
     with torch.no_grad():  # Turn off gradients for validation, saves memory and computations.
         for inputs, labels in data_loader:
             inputs, labels = inputs.float(), labels.float()  # Ensure data type consistency.
+            inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
+
             outputs = model(inputs)  # Get model outputs.
 
             # Convert outputs to predicted labels
@@ -313,12 +324,31 @@ def collect_misclassified(model, data_loader):
 def main():
     # Set random seed, for reproducibility
     torch.manual_seed(0)
+    np.random.seed(0)
+    torch.cuda.manual_seed_all(0)  # For CUDA
+
+    global device
+
+    if torch.cuda.is_available():
+        if OPTS.GPU:
+            device = torch.device("cuda")
+            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+        else:
+            device = torch.device("cpu")
+            print("GPU is available but not being used by choice.")
+    else:
+        device = torch.device("cpu")
+        print("GPU not available, using CPU.")
+
 
     # Train model
     if OPTS.model == 'baseline_cnn':
         model = BaselineCNN()
     elif OPTS.model == 'cnn':
         model = vgg16
+
+    
+    model.to(device)
     
     if OPTS.tune:
         tune_hyperparameters(model, hyperparams)
