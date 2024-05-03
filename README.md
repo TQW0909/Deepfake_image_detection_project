@@ -131,7 +131,7 @@ For a job we need to use the `run.sl` file and modify to run the desired process
 sbatch run.sl
 ```
 
-For runnig on the command line, do the following:
+For running on the command line, do the following:
 
 ```
 salloc --partition=gpu --nodes=1 --ntasks=1 --cpus-per-task=8 --time=3:00:00 --mem=32GB --gres=gpu:2
