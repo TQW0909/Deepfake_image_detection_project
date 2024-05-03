@@ -4,6 +4,7 @@ import sys
 import time
 import itertools
 import random
+import pandas as pd
 from tqdm import tqdm
 
 import matplotlib.pyplot as plt
@@ -20,38 +21,55 @@ import torch.cuda as cuda
 from Utils.dataloader import *
 
 from Models.baseline import BaselineCNN
-from Models.model import vgg16
+from Models.model import *
 
-from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import ExponentialLR
 
 OPTS = None
 
 loss_func = nn.BCEWithLogitsLoss()
 
+# Dict of hyperparameters and the potential values to test
 hyperparams = {
-    'learning_rates': [1e-1, 1e-2, 1e-3],
-    'batch_sizes': [16, 32, 64]
+    'learning_rates': [1e-3, 1e-4],
+    'batch_sizes': [32, 64],
+    'weight_decays': [1e-4, 1e-3],
+    'optimizers': ['SGD', 'Adam'],
+    'schedulers': ['StepLR', 'ExponentialLR'],
 }
+
+# hyperparams = {
+#     'learning_rates': [1e-2, 1e-1],
+#     'batch_sizes': [32, 64],
+#     'weight_decays': [1e-4, 1e-3],
+#     'optimizers': ['SGD', 'Adam'],
+#     'schedulers': ['StepLR', 'ExponentialLR'],
+# }
+
+# hyperparams = {
+#     'learning_rates': [1e-4],
+#     'batch_sizes': [64],
+#     'weight_decays': [1e-3],
+#     'optimizers': ['SGD'],
+#     'schedulers': ['ExponentialLR'],
+# }
 
 device = None
 
+# Enables the user to specify different functionaility
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('model', choices=['baseline_cnn', 'cnn'])
-    parser.add_argument('--learning-rate', '-r', type=float, default=1e-1)
-    parser.add_argument('--batch-size', '-b', type=int, default=32)
-    parser.add_argument('--num-epochs', '-T', type=int, default=30) 
-    parser.add_argument('--hidden-dim', '-i', type=int, default=200)
-    parser.add_argument('--dropout-prob', '-p', type=float, default=0.0)
-    parser.add_argument('--cnn-num-channels', '-c', type=int, default=5)
-    parser.add_argument('--cnn-kernel-size', '-k', type=int, default=3)
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--tune', action='store_true')
     parser.add_argument('--plot', action='store_true')
     parser.add_argument('--misclas', action='store_true')
     parser.add_argument('--GPU', action='store_true')
+    parser.add_argument('testset', choices=['train', 'test', 'both'])
     return parser.parse_args()
 
+# Plots the train and validation loss and accuracy for each epoch
 def plot_history(train_losses, val_losses, train_accuracies, val_accuracies):
     epochs = range(1, len(train_losses) + 1)
 
@@ -75,8 +93,10 @@ def plot_history(train_losses, val_losses, train_accuracies, val_accuracies):
     plt.legend()
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig('plot_history.png')
+    # plt.show()
 
+# Plot the results of hyperparameter tuning (Used in midterm report)
 def plot_tuning_results(results):
     # Extract data for plotting
     learning_rates = [r['learning_rate'] for r in results]
@@ -92,34 +112,19 @@ def plot_tuning_results(results):
     ax.set_zlabel('Validation Accuracy')
     plt.show()
 
-
+# Trains the model on test set and tests on the validation set
 def train(model, 
           train_loader, 
           dev_loader, 
           num_epochs=10, 
-          patience=3):
-
-    writer = SummaryWriter('runs/' + OPTS.model)
-    sample_inputs = torch.randn(1, 3, 256, 256)  # Adjust the shape based on your model
-    writer.add_graph(model, sample_inputs)
+          patience=3,
+          optimizer=None,
+          scheduler=None):
 
     train_losses, val_losses, train_accuracies, val_accuracies = [], [], [], []
 
     start_time = time.time()
-    # loss_func = nn.BCEWithLogitsLoss()
-    if OPTS.model == 'baseline_cnn':
-        optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9, weight_decay=1e-2)
-    elif OPTS.model == 'cnn':
-        base_params = list(map(id, model.features.parameters()))  # Parameters of the pre-trained features
-        new_params = filter(lambda p: id(p) not in base_params, model.parameters())  # Newly added parameters
 
-        # Adjusting the optimizer for fine-tuning with different learning rates:
-        optimizer = optim.SGD([
-            {'params': filter(lambda p: p.requires_grad, model.classifier.parameters()), 'lr': 0.01},
-            {'params': filter(lambda p: p.requires_grad, model.features.parameters()), 'lr': 0.01 * 0.1},
-        ], momentum=0.9, weight_decay=1e-2)
-
-    
     # Initialize variables for early stopping
     best_loss = float('inf')
     best_model = None
@@ -132,6 +137,7 @@ def train(model,
         model.train()  # Set the model to training mode
         running_loss = 0.0
         for inputs, labels in tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch'):
+        # for inputs, labels in train_loader:
             inputs, labels = inputs.float(), labels.float()  # Ensure data is the correct type
             inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
             optimizer.zero_grad()
@@ -151,9 +157,6 @@ def train(model,
 
         train_accuracy = 100 * correct_train / total_train
         
-        writer.add_scalar('Accuracy/train', train_accuracy, epoch)
-        writer.add_scalar('Loss/train', train_loss, epoch)
-
         # Validation loop (after each training epoch)
         model.eval()  # Set the model to evaluation mode
         val_running_loss = 0.0
@@ -161,6 +164,7 @@ def train(model,
         total = 0
         with torch.no_grad():  # No need to track gradients
             for inputs, labels in  tqdm(dev_loader, desc=f'Epoch {epoch+1}/{num_epochs}', unit='batch'):
+            # for inputs, labels in dev_loader:
                 inputs, labels = inputs.float(), labels.float()  # Ensure data is the correct type
                 inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
                 outputs = model(inputs)
@@ -173,15 +177,14 @@ def train(model,
         val_loss = val_running_loss / len(dev_loader)
         val_accuracy = 100 * correct / total
 
-        writer.add_scalar('Loss/validation', val_loss, epoch)
-        writer.add_scalar('Accuracy/validation', val_accuracy, epoch)
-
         # Store for graph plot
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         train_accuracies.append(train_accuracy)
         val_accuracies.append(val_accuracy)
 
+        if scheduler:
+            scheduler.step()
 
         print(f'Epoch {epoch+1}, Train Loss: {train_loss}, Train Accuracy: {train_accuracy}%, Validation Loss: {val_loss}, Validation Accuracy: {val_accuracy}%')
         
@@ -189,7 +192,7 @@ def train(model,
         if val_loss < best_loss:
             best_loss = val_loss
             best_model = deepcopy(model.state_dict())
-            torch.save(best_model, OPTS.model + '_best.pth')  # Save the best model
+            torch.save(best_model, OPTS.model + '1_best.pth')  # Save the best model
             epochs_no_improve = 0
         else:
             epochs_no_improve += 1
@@ -198,16 +201,15 @@ def train(model,
                 break
     
     # Load the best model state
-    model.load_state_dict(torch.load('model_best.pth'))
+    model.load_state_dict(torch.load(OPTS.model + '1_best.pth'))
     
     end_time = time.time()
     print(f'Training completed in {end_time - start_time:.2f} seconds.')
 
-    writer.close()
-
     return model, (train_losses, val_losses, train_accuracies, val_accuracies)
 
-def evaluate(model, test_loader):
+# Evaluate the model on the testset specified
+def evaluate(model, test_loader, test_set):
     model.eval()
 
     # Evaluation loop
@@ -216,6 +218,7 @@ def evaluate(model, test_loader):
     total = 0
     with torch.no_grad():
         for inputs, labels in tqdm(test_loader, desc='Evaluating', unit='batch'):
+        # for inputs, labels in test_loader:
 
             inputs, labels = inputs.float(), labels.float()  # Ensure data is the correct type
             inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
@@ -234,55 +237,106 @@ def evaluate(model, test_loader):
     avg_loss = total_loss / total
     accuracy = 100 * correct / total
 
-    print(f'Evaluation Loss: {avg_loss}, Accuracy: {accuracy}%')
+    print(f'Evaluation Loss for {test_set}: {avg_loss}, Accuracy: {accuracy}%')
     
     return avg_loss, accuracy
 
+
+# Tunes hyperparamerters using the dict of values to find the best combination (simple grid-search approach)
 def tune_hyperparameters(model, hyperparams, num_epochs=10, patience=3):
     best_val_accuracy = 0
     best_hyperparams = None
     results = []
 
     # Iterate over all combinations of hyperparameters
-    for lr, batch_size in itertools.product(hyperparams['learning_rates'], hyperparams['batch_sizes']):
-        print(f"\nTraining with learning rate: {lr} and batch size: {batch_size}")
+    for lr, batch_size, weight_decay, optimizer_name, scheduler_name in itertools.product(
+        hyperparams['learning_rates'], 
+        hyperparams['batch_sizes'], 
+        hyperparams['weight_decays'],
+        hyperparams['optimizers'],
+        hyperparams['schedulers'],
+    ):  
+        # Re-initialize the model
+        model = create_vgg16_model()
+        nn.DataParallel(model)
+        model.to(device)
+        torch.cuda.empty_cache()
+        
+        # Train model
+        print(f"\nTraining with Learning Rate: {lr}, Batch Size: {batch_size}, Weight Decay: {weight_decay}, Optimizer: {optimizer_name}, Scheduler: {scheduler_name}")
 
         # Create new instances of train and validation dataloaders with the new batch size
-        train_loader = create_data_loader(train_data, batch_size, True)  # shuffle=True for training data
-        dev_loader = create_data_loader(dev_data, batch_size, False)     # shuffle=False for validation data
+        train_loader = create_data_loader(train_data, batch_size, True)
+        dev_loader = create_data_loader(dev_data, batch_size, False)
 
-        # Define the optimizer with the current hyperparameters
-        optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=1e-2)
+        # Initialize the optimizer
+        if optimizer_name == 'SGD':
+            optimizer = optim.SGD([
+                {'params': filter(lambda p: p.requires_grad, model.classifier.parameters()), 'lr':lr},
+                {'params': filter(lambda p: p.requires_grad, model.features.parameters()), 'lr':lr * 0.1},
+            ], momentum=0.9, weight_decay=weight_decay)
+        elif optimizer_name == 'Adam':
+            optimizer = optim.Adam([
+                {'params': filter(lambda p: p.requires_grad, model.classifier.parameters()), 'lr':lr},
+                {'params': filter(lambda p: p.requires_grad, model.features.parameters()), 'lr':lr * 0.1},
+            ], weight_decay=weight_decay)
 
-        # Train the model using the current set of hyperparameters
-        _, data = train(model, train_loader, dev_loader, num_epochs, patience)
+        # Initialize the scheduler
+        scheduler = None
+        if scheduler_name == 'StepLR':
+            scheduler = StepLR(optimizer, step_size=5, gamma=0.1)
+        elif scheduler_name == 'ExponentialLR':
+            scheduler = ExponentialLR(optimizer, gamma=0.95)
 
-        # Unpack the data for the current training session
-        train_losses, val_losses, train_accuracies, val_accuracies = data
+        # Train and evaluate the model using the current hyperparameters
+        _, (train_losses, val_losses, train_accuracies, val_accuracies) = train(model, train_loader=train_loader, dev_loader=dev_loader, optimizer=optimizer, scheduler=scheduler)
 
-        # Determine the best validation accuracy in the current training session
-        max_val_accuracy = max(val_accuracies)
+        val_accuracy = max(val_accuracies)
 
         # Store the results
         results.append({
             'learning_rate': lr,
             'batch_size': batch_size,
-            'val_accuracy': max_val_accuracy
+            'weight_decay': weight_decay,
+            'optimizer': optimizer_name,
+            'scheduler': scheduler_name,
+            'val_accuracy': val_accuracy,
         })
 
-        # Update the best hyperparameters if the current model is better
-        if max_val_accuracy > best_val_accuracy:
-            best_val_accuracy = max_val_accuracy
-            best_hyperparams = {'learning_rate': lr, 'batch_size': batch_size}
+        # Update the best hyperparameters
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
+            best_hyperparams = {
+                'learning_rate': lr,
+                'batch_size': batch_size,
+                'weight_decay': weight_decay,
+                'optimizer': optimizer_name,
+                'scheduler': scheduler_name,
+            }
 
-    # Plot the results
-    plot_tuning_results(results)
+    # Convert results to a df
+    df = pd.DataFrame(results)
 
-    print(f"\nBest hyperparameters: Learning Rate={best_hyperparams['learning_rate']}, Batch Size={best_hyperparams['batch_size']} with Validation Accuracy={best_val_accuracy}")
+    # Output results as a table
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.axis('tight')
+    ax.axis('off')
+    table = ax.table(cellText=df.values, colLabels=df.columns, cellLoc='center', loc='center')
+    table.auto_set_font_size(False)
+    table.set_fontsize(10)
+    table.scale(1.2, 1.2)
+
+    # Save the figure as an image
+    plt.savefig("hyperparameters1.png", bbox_inches='tight')
+
+    print(f"\nBest Hyperparameters: {best_hyperparams} with Validation Accuracy={best_val_accuracy}")
     return best_hyperparams
 
-def collect_misclassified(model, data_loader):
+
+# Outputs 5 misclassified samples from a given set
+def collect_misclassified(model, data_loader, dataset):
     model.eval()  # Set the model to evaluation mode.
+    device = next(model.parameters()).device
     misclassified = []  # Store misclassified example data.
 
     with torch.no_grad():  # Turn off gradients for validation, saves memory and computations.
@@ -290,32 +344,36 @@ def collect_misclassified(model, data_loader):
             inputs, labels = inputs.float(), labels.float()  # Ensure data type consistency.
             inputs, labels = inputs.to(device), labels.to(device) # Enabling GPU
 
-            outputs = model(inputs)  # Get model outputs.
+            outputs = model(inputs) 
 
             # Convert outputs to predicted labels
-            predicted = torch.sigmoid(outputs).squeeze().round()  # Adjust this based on your output format.
+            predicted = torch.sigmoid(outputs).squeeze().round() 
 
-            # Compare predictions to true label
             mismatches = predicted != labels
+
             if any(mismatches):
                 misclassified_examples = inputs[mismatches]
                 misclassified_labels = labels[mismatches]
                 misclassified_preds = predicted[mismatches]
                 
                 for example, label, pred in zip(misclassified_examples, misclassified_labels, misclassified_preds):
-                    misclassified.append((example, label.item(), pred.item()))  # Store the misclassified example and the true/predicted labels.
-                
+                    example = example.cpu().numpy()
+                    label = label.item()
+                    pred = pred.item()
+                    misclassified.append((example, label, pred))                
     
-    misclassified_samples = random.sample(misclassified, min(5, len(misclassified)))
+    misclassified_samples = random.sample(misclassified, min(5, len(misclassified))) # Can change to more examples if needed
 
+    # Create figure to display examples
     plt.figure(figsize=(10, 10))
     for i, (image, true_label, pred_label) in enumerate(misclassified_samples):
-        plt.subplot(5, 5, i + 1)  # Adjust grid dimensions based on sample size.
-        image = image.permute(1, 2, 0)  # Rearrange dimensions from (C, H, W) to (H, W, C) if necessary.
+        plt.subplot(5, 5, i + 1)  
+        image = image.transpose(1, 2, 0)
         plt.imshow(image)
         plt.title(f'True: {true_label}, Pred: {pred_label}')
         plt.axis('off')
-    plt.show()
+    # plt.show()
+    plt.savefig('missclass_' + dataset + '.png')
 
 
     return misclassified
@@ -332,7 +390,15 @@ def main():
     if torch.cuda.is_available():
         if OPTS.GPU:
             device = torch.device("cuda")
-            print(f"Using GPU: {torch.cuda.get_device_name(0)}")
+
+            # Check how many GPUs are available
+            num_gpus = torch.cuda.device_count()
+
+            # Display each GPU's name
+            for i in range(num_gpus):
+                print(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+
+            print(f"Total GPUs available: {num_gpus}")  
         else:
             device = torch.device("cpu")
             print("GPU is available but not being used by choice.")
@@ -345,30 +411,52 @@ def main():
     if OPTS.model == 'baseline_cnn':
         model = BaselineCNN()
     elif OPTS.model == 'cnn':
-        model = vgg16
+        model = create_vgg16_model()
 
-    
+    nn.DataParallel(model) # For multi-GPU
     model.to(device)
     
     if OPTS.tune:
         tune_hyperparameters(model, hyperparams)
     else:
-        model, data = train(model, train_loader=train_loader, dev_loader=dev_loader)
+        if OPTS.model == 'baseline_cnn':
+            optimizer = optim.SGD(model.parameters(), lr=0.0001, momentum=0.9, weight_decay=0.001)
+
+            scheduler = None
+
+        elif OPTS.model == 'cnn':
+
+            # Adjusting the optimizer for fine-tuning with different learning rates:
+            optimizer = optim.Adam([
+                {'params': filter(lambda p: p.requires_grad, model.classifier.parameters()), 'lr': 0.0001},
+                {'params': filter(lambda p: p.requires_grad, model.features.parameters()), 'lr': 0.0001 * 0.1},
+            ], weight_decay=0.0001)
+
+            scheduler = ExponentialLR(optimizer, gamma=0.95)
+        
+        model, data = train(model, train_loader=train_loader, dev_loader=dev_loader, optimizer=optimizer, scheduler=scheduler)
 
         # Evaluate the model
         print('\nEvaluating final model:')
-        # train_acc = evaluate(model, X_train, y_train, 'Train')
-        # dev_acc = evaluate(model, X_dev, y_dev, 'Dev')
-        if OPTS.test:
-            test_acc = evaluate(model, test_loader=test_loader)
 
-        # Unpack the history and plot
+        if OPTS.test:
+            if OPTS.testset == 'train':
+                test_loss_trainset, test_acc_trainset = evaluate(model, test_loader=test_loader, test_set="deepfake_and_real_images (TRAIN)")
+            elif OPTS.testset == 'test':
+                test_loss_testset, test_acc_testset = evaluate(model, test_loader=deepfake_faces_test_loader, test_set="deepfake_faces_test (TEST)")
+            elif OPTS.testset == 'both':
+                test_loss_trainset, test_acc_trainset = evaluate(model, test_loader=test_loader, test_set="deepfake_and_real_images (TRAIN)")
+                test_loss_testset, test_acc_testset = evaluate(model, test_loader=deepfake_faces_test_loader, test_set="deepfake_faces_test (TEST)")
+
+        # Plot history
         if OPTS.plot:
             train_losses, val_losses, train_accuracies, val_accuracies = data
             plot_history(train_losses, val_losses, train_accuracies, val_accuracies)
 
+    # Show misclassified examples
     if OPTS.misclas:
-        misclassified = collect_misclassified(model, dev_loader)
+        misclassified = collect_misclassified(model, deepfake_faces_test_loader, 'test')
+        misclassified = collect_misclassified(model, test_loader, 'train')
 
 
 if __name__ == '__main__':

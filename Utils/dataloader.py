@@ -22,19 +22,11 @@ test_data = datasets.ImageFolder(root=DIRECTORY + 'Test',
 deepfake_faces_test_data = datasets.ImageFolder(root=TEST_DIRECTORY,
                                  transform=deepfake_faces_val_test_transforms)
 
+train_loader = DataLoader(train_data, batch_size=64, shuffle=True, num_workers=4, pin_memory=True, prefetch_factor=2)
+dev_loader = DataLoader(dev_data, batch_size=64, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
+test_loader = DataLoader(test_data, batch_size=64, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
 
-
-# train_loader = DataLoader(train_data, batch_size=64, shuffle=True, num_workers=4, pin_memory=True, prefetch_factor=2)
-# dev_loader = DataLoader(dev_data, batch_size=64, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
-# test_loader = DataLoader(test_data, batch_size=64, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
-
-# deepfake_faces_test_loader = DataLoader(deepfake_faces_test_data, batch_size=64, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
-
-train_loader = DataLoader(train_data, batch_size=32, shuffle=True, num_workers=4, pin_memory=True, prefetch_factor=2)
-dev_loader = DataLoader(dev_data, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
-test_loader = DataLoader(test_data, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
-
-deepfake_faces_test_loader = DataLoader(deepfake_faces_test_data, batch_size=32, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
+deepfake_faces_test_loader = DataLoader(deepfake_faces_test_data, batch_size=64, shuffle=False, num_workers=4, pin_memory=True, prefetch_factor=2)
 
 # Used for hyperparameter tuning
 def create_data_loader(data, batch_size, shuffle):
